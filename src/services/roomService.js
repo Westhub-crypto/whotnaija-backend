@@ -1,7 +1,7 @@
 // roomService.js
 const GameRoom = require('../models/GameRoom');
 const User = require('../models/User');
-const logger = require('./logger');
+const logger = require('../utils/logger');
 
 async function cleanupAbandonedRooms() {
   const cutoff = new Date(Date.now() - 10 * 60 * 1000); // 10 min ago
@@ -22,3 +22,4 @@ async function cleanupAbandonedRooms() {
 }
 
 module.exports = { cleanupAbandonedRooms };
+  
