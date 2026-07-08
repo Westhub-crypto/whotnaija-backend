@@ -2,6 +2,19 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 
+const SECURITY_QUESTIONS = [
+  'What is the name of your first pet?',
+  'What is your mother\'s maiden name?',
+  'What was the name of your primary school?',
+  'What is the name of the town where you were born?',
+  'What was your childhood nickname?',
+  'What is the name of your oldest sibling?',
+  'What was the name of your first best friend?',
+  'What was the make of your first car?',
+  'What was the name of the street you grew up on?',
+  'What is your oldest cousin\'s first name?',
+];
+
 const userSchema = new mongoose.Schema({
   firstName: {
     type: String,
@@ -64,6 +77,20 @@ const userSchema = new mongoose.Schema({
     minlength: [8, 'Password must be at least 8 characters'],
     select: false,
   },
+
+  // ── Security Question (replaces email-based password reset) ──────────────
+  securityQuestion: {
+    type: String,
+    required: [true, 'Security question is required'],
+    enum: SECURITY_QUESTIONS,
+  },
+  securityAnswer: {
+    // Stored as a bcrypt hash — never stored in plain text
+    type: String,
+    required: [true, 'Security answer is required'],
+    select: false,
+  },
+
   role: {
     type: String,
     enum: ['user', 'admin', 'superadmin'],
@@ -75,7 +102,7 @@ const userSchema = new mongoose.Schema({
   },
   isVerified: {
     type: Boolean,
-    default: false,
+    default: true, // No email verification needed — security question handles identity
   },
   isActive: {
     type: Boolean,
@@ -88,7 +115,7 @@ const userSchema = new mongoose.Schema({
   banReason: String,
   wallet: {
     balance: { type: Number, default: 0 },
-    bonusBalance: { type: Number, default: 500 }, // Welcome bonus
+    bonusBalance: { type: Number, default: 500 },
     totalDeposited: { type: Number, default: 0 },
     totalWithdrawn: { type: Number, default: 0 },
     totalWon: { type: Number, default: 0 },
@@ -116,7 +143,7 @@ const userSchema = new mongoose.Schema({
     bestWinStreak: { type: Number, default: 0 },
     level: { type: Number, default: 1 },
     xp: { type: Number, default: 0 },
-    assistedWinsRemaining: { type: Number, default: 3 }, // First 3 wins assisted
+    assistedWinsRemaining: { type: Number, default: 3 },
   },
   antiCheat: {
     suspiciousActivityCount: { type: Number, default: 0 },
@@ -124,10 +151,6 @@ const userSchema = new mongoose.Schema({
     flags: [String],
     riskScore: { type: Number, default: 0 },
   },
-  emailVerificationToken: String,
-  emailVerificationExpire: Date,
-  passwordResetToken: String,
-  passwordResetExpire: Date,
   lastLogin: Date,
   lastActive: Date,
   loginAttempts: { type: Number, default: 0 },
@@ -146,7 +169,10 @@ const userSchema = new mongoose.Schema({
   toObject: { virtuals: true },
 });
 
-// Indexes for performance
+// Expose the question list so routes can validate against it
+userSchema.statics.SECURITY_QUESTIONS = SECURITY_QUESTIONS;
+
+// Indexes
 userSchema.index({ email: 1 });
 userSchema.index({ username: 1 });
 userSchema.index({ phone: 1 });
@@ -159,7 +185,7 @@ userSchema.virtual('fullName').get(function () {
   return `${this.firstName} ${this.lastName}`;
 });
 
-// Virtual: total balance (wallet + bonus)
+// Virtual: total balance
 userSchema.virtual('totalBalance').get(function () {
   return this.wallet.balance + (this.wallet.hasDeposited ? this.wallet.bonusBalance : 0);
 });
@@ -169,6 +195,14 @@ userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
   const salt = await bcrypt.genSalt(12);
   this.password = await bcrypt.hash(this.password, salt);
+  next();
+});
+
+// Pre-save: hash security answer (normalised to lowercase first)
+userSchema.pre('save', async function (next) {
+  if (!this.isModified('securityAnswer')) return next();
+  const salt = await bcrypt.genSalt(10);
+  this.securityAnswer = await bcrypt.hash(this.securityAnswer.toLowerCase().trim(), salt);
   next();
 });
 
@@ -186,6 +220,11 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
+// Method: compare security answer
+userSchema.methods.compareSecurityAnswer = async function (candidateAnswer) {
+  return await bcrypt.compare(candidateAnswer.toLowerCase().trim(), this.securityAnswer);
+};
+
 // Method: check if account is locked
 userSchema.methods.isLocked = function () {
   return !!(this.lockUntil && this.lockUntil > Date.now());
@@ -201,28 +240,12 @@ userSchema.methods.incLoginAttempts = async function () {
   }
   const updates = { $inc: { loginAttempts: 1 } };
   if (this.loginAttempts + 1 >= 5 && !this.isLocked()) {
-    updates.$set = { lockUntil: Date.now() + 2 * 60 * 60 * 1000 }; // 2 hour lock
+    updates.$set = { lockUntil: Date.now() + 2 * 60 * 60 * 1000 };
   }
   return this.updateOne(updates);
 };
 
-// Method: generate email verification token
-userSchema.methods.generateEmailVerificationToken = function () {
-  const token = crypto.randomBytes(32).toString('hex');
-  this.emailVerificationToken = crypto.createHash('sha256').update(token).digest('hex');
-  this.emailVerificationExpire = Date.now() + 24 * 60 * 60 * 1000;
-  return token;
-};
-
-// Method: generate password reset token
-userSchema.methods.generatePasswordResetToken = function () {
-  const token = crypto.randomBytes(32).toString('hex');
-  this.passwordResetToken = crypto.createHash('sha256').update(token).digest('hex');
-  this.passwordResetExpire = Date.now() + 60 * 60 * 1000;
-  return token;
-};
-
-// Method: get available balance (wallet + bonus if eligible)
+// Method: get available balance
 userSchema.methods.getAvailableBalance = function () {
   const walletBal = this.wallet.balance;
   const bonusBal = this.wallet.hasDeposited ? this.wallet.bonusBalance : 0;
@@ -230,3 +253,4 @@ userSchema.methods.getAvailableBalance = function () {
 };
 
 module.exports = mongoose.model('User', userSchema);
+    
