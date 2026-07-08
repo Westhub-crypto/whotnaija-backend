@@ -2,10 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
-const { sendEmail } = require('../services/emailService');
 const { protect } = require('../middleware/auth');
 
 // Generate JWT token
@@ -43,11 +41,12 @@ const sendTokenResponse = (user, statusCode, res) => {
         gameStats: user.gameStats,
         referral: { code: user.referral?.code },
         avatar: user.avatar,
+        securityQuestion: user.securityQuestion,
       },
     });
 };
 
-// Validation rules
+// Validation rules for registration
 const registerValidation = [
   body('firstName').trim().notEmpty().withMessage('First name is required').isLength({ max: 50 }),
   body('lastName').trim().notEmpty().withMessage('Last name is required').isLength({ max: 50 }),
@@ -64,6 +63,14 @@ const registerValidation = [
     if (value !== req.body.password) throw new Error('Passwords do not match');
     return true;
   }),
+  body('securityQuestion').notEmpty().withMessage('Security question is required')
+    .custom((value) => {
+      const questions = User.SECURITY_QUESTIONS || [];
+      if (!questions.includes(value)) throw new Error('Invalid security question selected');
+      return true;
+    }),
+  body('securityAnswer').trim().notEmpty().withMessage('Security answer is required')
+    .isLength({ min: 2, max: 100 }).withMessage('Security answer must be 2-100 characters'),
 ];
 
 // @route   POST /api/auth/register
@@ -74,9 +81,12 @@ router.post('/register', registerValidation, async (req, res) => {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
 
-    const { firstName, lastName, middleName, username, email, phone, state, lga, password, referralCode } = req.body;
+    const {
+      firstName, lastName, middleName, username, email, phone,
+      state, lga, password, referralCode, securityQuestion, securityAnswer,
+    } = req.body;
 
-    // Check existing user
+    // Check for existing user
     const existingUser = await User.findOne({
       $or: [{ email }, { username: username.toLowerCase() }, { phone }],
     });
@@ -89,7 +99,7 @@ router.post('/register', registerValidation, async (req, res) => {
       return res.status(400).json({ success: false, message: `${field} already exists` });
     }
 
-    // Handle referral
+    // Handle referral code
     let referredByUser = null;
     if (referralCode) {
       referredByUser = await User.findOne({ 'referral.code': referralCode.toUpperCase() });
@@ -105,19 +115,21 @@ router.post('/register', registerValidation, async (req, res) => {
       state,
       lga,
       password,
+      securityQuestion,
+      securityAnswer, // hashed by the pre-save hook
       referral: {
         referredBy: referredByUser?._id || null,
       },
     });
 
-    // Handle referral commission setup
+    // Link referral
     if (referredByUser) {
       await User.findByIdAndUpdate(referredByUser._id, {
         $push: { 'referral.referrals': user._id },
       });
     }
 
-    // Send welcome bonus transaction record
+    // Record welcome bonus
     await Transaction.create({
       userId: user._id,
       type: 'welcome-bonus',
@@ -128,22 +140,6 @@ router.post('/register', registerValidation, async (req, res) => {
       balanceBefore: 0,
       balanceAfter: 500,
     });
-
-    // Send verification email
-    const verifyToken = user.generateEmailVerificationToken();
-    await user.save({ validateBeforeSave: false });
-
-    try {
-      const verifyUrl = `${process.env.CLIENT_URL}/verify-email/${verifyToken}`;
-      await sendEmail({
-        to: user.email,
-        subject: 'Welcome to WhotNaija - Verify Your Email',
-        template: 'welcome',
-        data: { name: user.firstName, verifyUrl },
-      });
-    } catch (emailErr) {
-      // Don't fail registration if email fails
-    }
 
     sendTokenResponse(user, 201, res);
   } catch (err) {
@@ -222,82 +218,115 @@ router.post('/logout', protect, async (req, res) => {
 // @route   GET /api/auth/me
 router.get('/me', protect, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id)
-      .select('-password -emailVerificationToken -passwordResetToken');
+    const user = await User.findById(req.user._id).select('-password -securityAnswer');
     res.json({ success: true, user });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to fetch user' });
   }
 });
 
-// @route   POST /api/auth/verify-email/:token
-router.post('/verify-email/:token', async (req, res) => {
-  try {
-    const hashedToken = crypto.createHash('sha256').update(req.params.token).digest('hex');
-    const user = await User.findOne({
-      emailVerificationToken: hashedToken,
-      emailVerificationExpire: { $gt: Date.now() },
-    });
+// @route   GET /api/auth/security-questions
+// Returns the list of available security questions for the registration form dropdown
+router.get('/security-questions', (req, res) => {
+  res.json({ success: true, questions: User.SECURITY_QUESTIONS });
+});
 
-    if (!user) {
-      return res.status(400).json({ success: false, message: 'Invalid or expired verification token' });
+// @route   POST /api/auth/forgot-password/verify-identity
+// Step 1 — user supplies email + answer to their security question
+// Returns a short-lived reset token if the answer is correct
+router.post('/forgot-password/verify-identity', [
+  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
+  body('securityAnswer').trim().notEmpty().withMessage('Security answer is required'),
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
     }
 
-    user.isVerified = true;
-    user.emailVerificationToken = undefined;
-    user.emailVerificationExpire = undefined;
+    const { email, securityAnswer } = req.body;
+
+    // Always use the same generic error message to avoid revealing
+    // whether the email exists in the system
+    const IDENTITY_FAIL = 'Email or security answer is incorrect';
+
+    const user = await User.findOne({ email }).select('+securityAnswer');
+    if (!user) {
+      return res.status(400).json({ success: false, message: IDENTITY_FAIL });
+    }
+
+    const isCorrect = await user.compareSecurityAnswer(securityAnswer);
+    if (!isCorrect) {
+      return res.status(400).json({ success: false, message: IDENTITY_FAIL });
+    }
+
+    // Identity confirmed — issue a single-use reset token (expires in 15 minutes)
+    const crypto = require('crypto');
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    user.passwordResetToken = hashedToken;
+    user.passwordResetExpire = Date.now() + 15 * 60 * 1000; // 15 min
     await user.save({ validateBeforeSave: false });
 
-    res.json({ success: true, message: 'Email verified successfully' });
+    res.json({
+      success: true,
+      message: 'Identity verified. You may now reset your password.',
+      resetToken: rawToken,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Email verification failed' });
+    res.status(500).json({ success: false, message: 'Verification failed. Please try again.' });
   }
 });
 
-// @route   POST /api/auth/forgot-password
-router.post('/forgot-password', [
-  body('email').isEmail().withMessage('Valid email required'),
+// @route   POST /api/auth/forgot-password/get-question
+// Helper — given an email, returns that user's security question
+// (so the frontend can display the right question before asking for the answer)
+router.post('/forgot-password/get-question', [
+  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
 ], async (req, res) => {
   try {
-    const user = await User.findOne({ email: req.body.email.toLowerCase() });
-    if (!user) {
-      return res.json({ success: true, message: 'If that email exists, a reset link has been sent.' });
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
     }
 
-    const resetToken = user.generatePasswordResetToken();
-    await user.save({ validateBeforeSave: false });
+    const user = await User.findOne({ email: req.body.email }).select('securityQuestion');
 
-    const resetUrl = `${process.env.CLIENT_URL}/reset-password/${resetToken}`;
-    await sendEmail({
-      to: user.email,
-      subject: 'WhotNaija - Password Reset Request',
-      template: 'passwordReset',
-      data: { name: user.firstName, resetUrl },
-    });
-
-    res.json({ success: true, message: 'Password reset link sent to your email' });
+    // Always respond 200 with a question (even if fake) to prevent email enumeration
+    const question = user?.securityQuestion || 'What is the name of your first pet?';
+    res.json({ success: true, question });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to send reset email' });
+    res.status(500).json({ success: false, message: 'Failed to retrieve question.' });
   }
 });
 
 // @route   POST /api/auth/reset-password/:token
+// Step 2 — user supplies the token from verify-identity + new password
 router.post('/reset-password/:token', [
-  body('password').isLength({ min: 8 }).matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/),
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/).withMessage('Password must contain uppercase, lowercase and number'),
   body('confirmPassword').custom((v, { req }) => {
     if (v !== req.body.password) throw new Error('Passwords do not match');
     return true;
   }),
 ], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const crypto = require('crypto');
     const hashedToken = crypto.createHash('sha256').update(req.params.token).digest('hex');
+
     const user = await User.findOne({
       passwordResetToken: hashedToken,
       passwordResetExpire: { $gt: Date.now() },
     });
 
     if (!user) {
-      return res.status(400).json({ success: false, message: 'Invalid or expired reset token' });
+      return res.status(400).json({ success: false, message: 'Reset token is invalid or has expired' });
     }
 
     user.password = req.body.password;
@@ -309,8 +338,9 @@ router.post('/reset-password/:token', [
 
     res.json({ success: true, message: 'Password reset successfully. Please login.' });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Password reset failed' });
+    res.status(500).json({ success: false, message: 'Password reset failed. Please try again.' });
   }
 });
 
 module.exports = router;
+          
