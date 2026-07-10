@@ -63,12 +63,8 @@ const registerValidation = [
     if (value !== req.body.password) throw new Error('Passwords do not match');
     return true;
   }),
-  body('securityQuestion').notEmpty().withMessage('Security question is required')
-    .custom((value) => {
-      const questions = User.SECURITY_QUESTIONS || [];
-      if (!questions.includes(value)) throw new Error('Invalid security question selected');
-      return true;
-    }),
+  body('securityQuestion').trim().notEmpty().withMessage('Security question is required')
+    .isLength({ min: 5, max: 200 }).withMessage('Security question must be 5-200 characters'),
   body('securityAnswer').trim().notEmpty().withMessage('Security answer is required')
     .isLength({ min: 2, max: 100 }).withMessage('Security answer must be 2-100 characters'),
 ];
@@ -225,11 +221,7 @@ router.get('/me', protect, async (req, res) => {
   }
 });
 
-// @route   GET /api/auth/security-questions
-// Returns the list of available security questions for the registration form dropdown
-router.get('/security-questions', (req, res) => {
-  res.json({ success: true, questions: User.SECURITY_QUESTIONS });
-});
+
 
 // @route   POST /api/auth/forgot-password/verify-identity
 // Step 1 — user supplies email + answer to their security question
@@ -343,4 +335,3 @@ router.post('/reset-password/:token', [
 });
 
 module.exports = router;
-          
