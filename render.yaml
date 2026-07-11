@@ -1,0 +1,83 @@
+services:
+  # Backend API Service
+  - type: web
+    name: whotnaija-backend
+    runtime: node
+    region: oregon
+    plan: starter
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: CLIENT_URL
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRE
+        value: 7d
+      - key: JWT_COOKIE_EXPIRE
+        value: 7
+      - key: SQUAD_SECRET_KEY
+        sync: false
+      - key: SQUAD_PUBLIC_KEY
+        sync: false
+      - key: SQUAD_BASE_URL
+        value: https://api-d.squadco.com
+      - key: SQUAD_WEBHOOK_SECRET
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: 587
+      - key: SMTP_EMAIL
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: FROM_NAME
+        value: WhotNaija
+      - key: FROM_EMAIL
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_USERNAME
+        value: whotnaija_admin
+      - key: PLATFORM_FEE_PERCENT
+        value: 10
+      - key: WELCOME_BONUS
+        value: 500
+      - key: MIN_DEPOSIT
+        value: 1000
+      - key: MIN_WITHDRAWAL
+        value: 1000
+      - key: NEW_USER_ASSISTED_WINS
+        value: 3
+      - key: ENCRYPTION_KEY
+        generateValue: true
+
+  # Frontend Static Site
+  - type: web
+    name: whotnaija-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./build
+    envVars:
+      - key: REACT_APP_API_URL
+        sync: false
+      - key: REACT_APP_SOCKET_URL
+        sync: false
+      - key: REACT_APP_SQUAD_PUBLIC_KEY
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
