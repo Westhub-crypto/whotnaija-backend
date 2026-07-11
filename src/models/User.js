@@ -144,8 +144,9 @@ userSchema.methods.incLoginAttempts = async function () {
 };
 
 userSchema.methods.getAvailableBalance = function () {
-  return this.wallet.balance + (this.wallet.hasDeposited ? this.wallet.bonusBalance : 0);
+  // Bonus is always available for playing games.
+  // Withdrawal is blocked separately until user has deposited — see payment route.
+  return this.wallet.balance + this.wallet.bonusBalance;
 };
 
 module.exports = mongoose.model('User', userSchema);
-                     
