@@ -8,11 +8,13 @@ const { protect } = require('../middleware/auth');
 router.get('/balance', protect, async (req, res) => {
   try {
     const user = await User.findById(req.user._id).select('wallet bankDetails');
+    // Bonus is always shown and usable for gameplay.
+    // Withdrawal requires hasDeposited=true — enforced in the payment/withdraw route.
     res.json({
       success: true,
       balance: user.wallet.balance,
-      bonusBalance: user.wallet.hasDeposited ? user.wallet.bonusBalance : 0,
-      totalBalance: user.getAvailableBalance ? user.getAvailableBalance() : user.wallet.balance,
+      bonusBalance: user.wallet.bonusBalance,
+      totalBalance: user.wallet.balance + user.wallet.bonusBalance,
       hasDeposited: user.wallet.hasDeposited,
       totalDeposited: user.wallet.totalDeposited,
       totalWithdrawn: user.wallet.totalWithdrawn,
@@ -45,3 +47,4 @@ router.get('/transactions', protect, async (req, res) => {
 });
 
 module.exports = router;
+      
